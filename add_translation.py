@@ -74,8 +74,8 @@ def load_word_data(chapter, cache_dir=None):
     """Fetch/load word-by-word Arabic text and translations for a Quran chapter.
 
     Results are cached as wbw_<chapter>.json beside this script.  Returns a
-    dict mapping verse_number (int) → list of (arabic_norm, en_translation)
-    tuples.  Returns {} on network failure when no cache exists.
+    dict mapping verse_number (int) → list of (raw_arabic, norm_arabic,
+    en_translation) tuples.  Returns {} on network failure when no cache exists.
     """
     if cache_dir is None:
         cache_dir = os.path.dirname(os.path.abspath(__file__)) or '.'
@@ -121,10 +121,10 @@ def load_word_data(chapter, cache_dir=None):
 
     result = {}
     for vnum_str, pairs in raw.items():
-        norm_pairs = [(normalize_arabic(ar), en) for ar, en in pairs]
-        norm_pairs = [(ar, en) for ar, en in norm_pairs if ar]
-        if norm_pairs:
-            result[int(vnum_str)] = norm_pairs
+        triples = [(ar, normalize_arabic(ar), en) for ar, en in pairs]
+        triples = [(raw_ar, norm_ar, en) for raw_ar, norm_ar, en in triples if norm_ar]
+        if triples:
+            result[int(vnum_str)] = triples
     return result
 
 
@@ -408,7 +408,8 @@ def _anchor_end(word_en, translation, hint_pos, punct_breaks, word_breaks):
     return None
 
 
-def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None):
+def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None,
+                       verse_arabic='', ayah_num=0):
     """Given a verse's SRT blocks and its translation, produce output blocks.
 
     Uses word-by-word API data (verse_words) to anchor English split points
@@ -416,7 +417,11 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None)
     character-level fuzzy matching and then proportional splitting when
     word data is unavailable.
 
-    verse_words: list of (arabic_norm, en_translation) tuples.
+    verse_words:  list of (raw_arabic, norm_arabic, en_translation) tuples.
+    verse_arabic: full polished Arabic text for the verse (for fallbacks).
+    ayah_num:     verse number for warning messages.
+
+    Arabic splitting priority: word-by-word > proportional > Whisper.
     Returns list of (start, end, arabic, english).
     """
     if not srt_blocks:
@@ -425,8 +430,9 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None)
     n = len(srt_blocks)
     if n == 1:
         b = srt_blocks[0]
+        ar = verse_arabic or b['text']
         return [(ts_start(b['timestamp']), ts_end(b['timestamp']),
-                 b['text'], translation)]
+                 ar, translation)]
 
     en_len = len(translation)
 
@@ -474,7 +480,9 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None)
     cum_ar = [sum(ar_lens[:i]) for i in range(n)]
 
     # Extract Arabic word list and pre-compute word ranges for all blocks
-    ar_words = [ar for ar, _ in verse_words] if verse_words else []
+    # verse_words is list of (raw_arabic, norm_arabic, english) 3-tuples
+    raw_ar_words = [raw for raw, _, _ in verse_words] if verse_words else []
+    ar_words = [norm for _, norm, _ in verse_words] if verse_words else []
     nw = len(ar_words)
     word_ranges = [
         _match_word_range(b['norm'], ar_words) if ar_words else None
@@ -506,7 +514,7 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None)
         else:
             anchor = None
             if wr is not None and verse_words and nw:
-                last_word_en = verse_words[wr[1] - 1][1]
+                last_word_en = verse_words[wr[1] - 1][2]
                 hint = round(wr[1] / nw * en_len)
                 anchor = _anchor_end(last_word_en, translation, hint,
                                      punct_breaks, word_breaks)
@@ -531,8 +539,32 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None)
             en_end = later[0] if later else en_len
 
         english = translation[en_start:en_end].strip() or translation.strip()
+
+        # ── Arabic slice ──────────────────────────────────────────────
+        if wr is not None and raw_ar_words:
+            # Primary: use word-by-word raw Arabic
+            arabic = ' '.join(raw_ar_words[wr[0]:wr[1]])
+        elif verse_arabic:
+            # Fallback: proportional split of verse_arabic at space boundaries
+            print(f'WARNING: Using proportional Arabic split for block '
+                  f'{i+1}/{n} of verse {ayah_num}')
+            ar_words_full = verse_arabic.split()
+            total_w = len(ar_words_full)
+            start_frac = cum_ar[i] / total_ar
+            end_frac = (cum_ar[i] + ar_lens[i]) / total_ar
+            w_start = max(0, round(start_frac * total_w))
+            w_end = min(total_w, round(end_frac * total_w))
+            if w_end <= w_start:
+                w_end = min(w_start + 1, total_w)
+            arabic = ' '.join(ar_words_full[w_start:w_end]) or verse_arabic
+        else:
+            # Last resort: Whisper's transcription
+            print(f'WARNING: Using Whisper Arabic fallback for block '
+                  f'{i+1}/{n} of verse {ayah_num}')
+            arabic = b['text']
+
         results.append((ts_start(b['timestamp']), ts_end(b['timestamp']),
-                        b['text'], english))
+                        arabic, english))
         cursor = en_end
 
     return results
@@ -580,11 +612,10 @@ def build_output(blocks, verses, assignments, word_data=None, return_segments=Fa
         verse_words = word_data.get(ayah_num) if word_data else None
         merged = build_verse_blocks(vblocks, translation,
                                     verse_norm=verses[vi]['norm'],
-                                    verse_words=verse_words)
-        for idx_in_verse, (start, end, _whisper_arabic, english) in enumerate(merged):
-            # Use the polished Arabic from the translation file rather than the
-            # Whisper transcription, which may be noisy or missing diacritics.
-            arabic = verse_arabic
+                                    verse_words=verse_words,
+                                    verse_arabic=verse_arabic,
+                                    ayah_num=ayah_num)
+        for idx_in_verse, (start, end, arabic, english) in enumerate(merged):
             if idx_in_verse == 0:
                 arabic = to_arabic_numeral(ayah_num) + ' ' + arabic
                 english = str(ayah_num) + '. ' + english
