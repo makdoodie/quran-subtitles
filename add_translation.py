@@ -483,6 +483,8 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None,
     # verse_words is list of (raw_arabic, norm_arabic, english) 3-tuples
     raw_ar_words = [raw for raw, _, _ in verse_words] if verse_words else []
     ar_words = [norm for _, norm, _ in verse_words] if verse_words else []
+    # Pre-split verse_arabic for proportional fallback (used if word data unavailable)
+    ar_words_full = verse_arabic.split() if verse_arabic else []
     nw = len(ar_words)
     word_ranges = [
         _match_word_range(b['norm'], ar_words) if ar_words else None
@@ -548,7 +550,6 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None,
             # Fallback: proportional split of verse_arabic at space boundaries
             print(f'WARNING: Using proportional Arabic split for block '
                   f'{i+1}/{n} of verse {ayah_num}')
-            ar_words_full = verse_arabic.split()
             total_w = len(ar_words_full)
             start_frac = cum_ar[i] / total_ar
             end_frac = (cum_ar[i] + ar_lens[i]) / total_ar

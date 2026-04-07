@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from add_translation import (
     load_word_data, build_verse_blocks, build_output,
-    normalize_arabic, match_blocks_to_verses,
+    normalize_arabic,
 )
 
 
