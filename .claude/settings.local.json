@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python add_translation.py \"surah yusuf translation.txt\" \"surah yusuf.srt\")",
+      "Bash(pip show:*)",
+      "Bash(python -c \"import add_translation; print\\(''OK''\\)\")",
+      "Bash(python quran_video.py \"surah yusuf.mp3\" \"surah yusuf translated.srt\" \"surah yusuf.mp4\")"
+    ]
+  }
+}

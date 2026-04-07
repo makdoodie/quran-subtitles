@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quran Video Maker</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Quran Video Maker</h1>
+
+    <div class="drop-zone" id="drop-zone">
+        Drop MP3 here or click to browse
+        <input type="file" id="file-input" accept=".mp3,audio/mpeg" hidden>
+    </div>
+
+    <div class="form-group">
+        <label for="surah">Surah</label>
+        <select id="surah"></select>
+    </div>
+    <div class="form-group">
+        <label>Translation</label>
+        <span style="flex:1;font-size:0.9rem;color:#ccc">Sahih International</span>
+        <input type="hidden" id="translation" value="20">
+    </div>
+    <div class="form-group">
+        <label for="translation-file">Or upload</label>
+        <input type="file" id="translation-file" accept=".txt" style="
+            flex:1; font-size:0.85rem; color:#aaa;
+        ">
+    </div>
+    <div class="form-group">
+        <label for="resolution">Resolution</label>
+        <select id="resolution">
+            <option value="1280x720">1280 x 720</option>
+            <option value="1920x1080" selected>1920 x 1080</option>
+            <option value="3840x2160">3840 x 2160</option>
+        </select>
+    </div>
+
+    <button id="btn-generate" disabled>Generate Video</button>
+
+    <div class="progress-log" id="progress-log"></div>
+
+    <button id="btn-download">Download MP4</button>
+</div>
+
+<script>
+const SURAHS = [
+    "Al-Fatihah","Al-Baqarah","Ali 'Imran","An-Nisa","Al-Ma'idah","Al-An'am",
+    "Al-A'raf","Al-Anfal","At-Tawbah","Yunus","Hud","Yusuf","Ar-Ra'd","Ibrahim",
+    "Al-Hijr","An-Nahl","Al-Isra","Al-Kahf","Maryam","Taha","Al-Anbya","Al-Hajj",
+    "Al-Mu'minun","An-Nur","Al-Furqan","Ash-Shu'ara","An-Naml","Al-Qasas",
+    "Al-'Ankabut","Ar-Rum","Luqman","As-Sajdah","Al-Ahzab","Saba","Fatir","Ya-Sin",
+    "As-Saffat","Sad","Az-Zumar","Ghafir","Fussilat","Ash-Shuraa","Az-Zukhruf",
+    "Ad-Dukhan","Al-Jathiyah","Al-Ahqaf","Muhammad","Al-Fath","Al-Hujurat","Qaf",
+    "Adh-Dhariyat","At-Tur","An-Najm","Al-Qamar","Ar-Rahman","Al-Waqi'ah",
+    "Al-Hadid","Al-Mujadila","Al-Hashr","Al-Mumtahanah","As-Saf","Al-Jumu'ah",
+    "Al-Munafiqun","At-Taghabun","At-Talaq","At-Tahrim","Al-Mulk","Al-Qalam",
+    "Al-Haqqah","Al-Ma'arij","Nuh","Al-Jinn","Al-Muzzammil","Al-Muddaththir",
+    "Al-Qiyamah","Al-Insan","Al-Mursalat","An-Naba","An-Nazi'at","'Abasa",
+    "At-Takwir","Al-Infitar","Al-Mutaffifin","Al-Inshiqaq","Al-Buruj","At-Tariq",
+    "Al-A'la","Al-Ghashiyah","Al-Fajr","Al-Balad","Ash-Shams","Al-Layl",
+    "Ad-Duhaa","Ash-Sharh","At-Tin","Al-'Alaq","Al-Qadr","Al-Bayyinah",
+    "Az-Zalzalah","Al-'Adiyat","Al-Qari'ah","At-Takathur","Al-'Asr","Al-Humazah",
+    "Al-Fil","Quraysh","Al-Ma'un","Al-Kawthar","Al-Kafirun","An-Nasr","Al-Masad",
+    "Al-Ikhlas","Al-Falaq","An-Nas"
+];
+
+// Populate surah dropdown
+const surahSelect = document.getElementById('surah');
+SURAHS.forEach((name, i) => {
+    const opt = document.createElement('option');
+    opt.value = i + 1;
+    opt.textContent = `${i + 1}. ${name}`;
+    surahSelect.appendChild(opt);
+});
+
+// File handling
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const btnGenerate = document.getElementById('btn-generate');
+const btnDownload = document.getElementById('btn-download');
+const progressLog = document.getElementById('progress-log');
+let selectedFile = null;
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.toLowerCase().endsWith('.mp3')) setFile(file);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+function setFile(file) {
+    selectedFile = file;
+    // Preserve the hidden file input — textContent would destroy it
+    Array.from(dropZone.childNodes).forEach(n => { if (n !== fileInput) dropZone.removeChild(n); });
+    dropZone.insertBefore(document.createTextNode(file.name), fileInput);
+    dropZone.classList.add('has-file');
+    btnGenerate.disabled = false;
+}
+
+// Pipeline steps config
+const STEPS = [
+    { id: 'whisper', label: 'Transcribing audio...' },
+    { id: 'translation', label: 'Fetching translation...' },
+    { id: 'matching', label: 'Matching subtitles to verses...' },
+    { id: 'ffmpeg', label: 'Generating video...' },
+];
+
+btnGenerate.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    btnGenerate.disabled = true;
+    btnDownload.style.display = 'none';
+
+    // Reset progress log
+    progressLog.style.display = 'block';
+    progressLog.innerHTML = '';
+    STEPS.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'step';
+        div.id = `step-${s.id}`;
+        div.innerHTML = `<span class="icon"></span><span class="detail">${s.label}</span><span class="status"></span>`;
+        progressLog.appendChild(div);
+    });
+
+    // Upload and start
+    const form = new FormData();
+    form.append('mp3', selectedFile);
+    form.append('surah', document.getElementById('surah').value);
+    form.append('translation', document.getElementById('translation').value);
+    form.append('resolution', document.getElementById('resolution').value);
+    const transFile = document.getElementById('translation-file').files[0];
+    if (transFile) form.append('translation_file', transFile);
+
+    try {
+        const resp = await fetch('/generate', { method: 'POST', body: form });
+        const data = await resp.json();
+        if (data.error) { showError(data.error); return; }
+        listenProgress(data.job_id);
+    } catch (err) {
+        showError('Failed to start: ' + err.message);
+    }
+});
+
+function listenProgress(jobId) {
+    const es = new EventSource(`/progress/${jobId}`);
+    es.onmessage = (e) => {
+        const ev = JSON.parse(e.data);
+        if (ev.step === 'keepalive') return;
+        if (ev.step === 'done') {
+            es.close();
+            btnDownload.style.display = 'block';
+            btnDownload.onclick = () => { window.location.href = `/download/${jobId}`; };
+            btnGenerate.disabled = false;
+            return;
+        }
+        if (ev.step === 'error') {
+            es.close();
+            showError(ev.detail);
+            btnGenerate.disabled = false;
+            return;
+        }
+        // Update step UI
+        const el = document.getElementById(`step-${ev.step}`);
+        if (!el) return;
+        if (ev.status === 'running') {
+            el.classList.add('active');
+            el.querySelector('.icon').innerHTML = '<span class="spinner"></span>';
+            if (ev.percent !== undefined) {
+                el.querySelector('.status').textContent = ev.percent + '%';
+            }
+        } else if (ev.status === 'done') {
+            el.classList.remove('active');
+            el.classList.add('done');
+            el.querySelector('.icon').textContent = '\u2713';
+            el.querySelector('.status').textContent = 'done';
+        }
+    };
+    es.onerror = () => { es.close(); showError('Connection lost'); btnGenerate.disabled = false; };
+}
+
+function showError(msg) {
+    const div = document.createElement('div');
+    div.className = 'step error';
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+    icon.textContent = '\u2717';
+    const detail = document.createElement('span');
+    detail.className = 'detail';
+    detail.textContent = msg;
+    div.appendChild(icon);
+    div.appendChild(detail);
+    progressLog.appendChild(div);
+}
+</script>
+</body>
+</html>
