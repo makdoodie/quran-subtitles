@@ -171,6 +171,56 @@ class TestBuildOutputArabicSplit:
         # The two blocks should have DIFFERENT Arabic
         assert ar1 != ar2
 
+    def test_em_dash_not_split_mid_phrase(self):
+        """Em dash in translation must be a valid break point.
+
+        When the polished translation contains an em dash (e.g. 'Jacob—˹just˺'),
+        snap() must treat it like punctuation so the split lands at the dash,
+        not at a word boundary several words earlier that leaves 'of Jacob' on
+        the wrong block.
+        """
+        # Simulates Surah Yusuf 12:6: two SRT blocks for a verse whose English
+        # contains an em dash mid-phrase ("descendants of Jacob—˹just˺ as…").
+        verse_arabic = (
+            'وَيُتِمُّ نِعْمَتَهُۥ عَلَيْكَ وَعَلَىٰٓ ءَالِ يَعْقُوبَ '
+            'كَمَآ أَتَمَّهَا عَلَىٰٓ أَبَوَيْكَ مِن قَبْلُ إِبْرَٰهِيمَ وَإِسْحَـٰقَ '
+            'إِنَّ رَبَّكَ عَلِيمٌ حَكِيمٌۭ'
+        )
+        block1 = make_block(
+            1, '00:01:07,040', '00:01:12,240',
+            'وَيُتِمُّ نِعْمَتَهُۥ عَلَيْكَ وَعَلَىٰٓ ءَالِ يَعْقُوبَ',
+        )
+        block2 = make_block(
+            2, '00:01:12,240', '00:01:28,640',
+            'كَمَآ أَتَمَّهَا عَلَىٰٓ أَبَوَيْكَ مِن قَبْلُ إِبْرَٰهِيمَ وَإِسْحَـٰقَ '
+            'إِنَّ رَبَّكَ عَلِيمٌ حَكِيمٌۭ',
+        )
+        translation = (
+            'and perfect His favour upon you and the descendants of Jacob—˹just˺ '
+            'as He once perfected it upon your forefathers, Abraham and Isaac. '
+            'Surely your Lord is All-Knowing, All-Wise.'
+        )
+
+        result = build_verse_blocks(
+            [block1, block2],
+            translation,
+            verse_norm=normalize_arabic(verse_arabic),
+            verse_words=None,  # force proportional fallback, exposing the snap() bug
+            verse_arabic=verse_arabic,
+            ayah_num=6,
+        )
+
+        assert len(result) == 2
+        en1 = result[0][3]
+        en2 = result[1][3]
+        # "of Jacob" belongs to block 1 — it must NOT bleed into block 2
+        assert 'of Jacob' in en1, (
+            f'Expected "of Jacob" in block 1 English, got: {en1!r}'
+        )
+        assert not en2.startswith('of Jacob'), (
+            f'Block 2 English must not start with "of Jacob", got: {en2!r}'
+        )
+
     def test_verse_number_only_on_first_block(self):
         """Verse number should appear on first block only."""
         blocks = [
