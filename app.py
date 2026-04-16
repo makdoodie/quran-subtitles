@@ -198,14 +198,17 @@ def run_pipeline(job_id, mp3_path, surah, translation_id, res,
             beam_size=5,
             vad_filter=True,
             condition_on_previous_text=False,
+            word_timestamps=True,
         )
 
-        # Build SRT content from Whisper segments
-        srt_lines = []
-        for idx, seg in enumerate(segments_iter, 1):
-            start = _format_srt_time(seg.start)
-            end = _format_srt_time(seg.end)
-            srt_lines.append(f'{idx}\n{start} --> {end}\n{seg.text.strip()}\n')
+        # Flatten words from all segments, skip segments with no word data
+        all_words = []
+        for seg in segments_iter:
+            if seg.words:
+                all_words.extend(seg.words)
+
+        # Split into SRT blocks at every breath pause
+        srt_lines = _words_to_srt_blocks(all_words)
 
         srt_path = str(job_dir / 'transcription.srt')
         with open(srt_path, 'w', encoding='utf-8') as f:
