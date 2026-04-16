@@ -26,6 +26,9 @@ jobs = {}
 QURAN_API = 'https://api.quran.com/api/v4'
 API_HEADERS = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
 
+# Minimum silence gap (seconds) between words that triggers a new SRT block.
+BREATH_PAUSE_MS = 0.4
+
 
 def fetch_translation(chapter, translation_id):
     """Fetch Arabic text + English translation for a chapter from quran.com.
@@ -318,6 +321,32 @@ def _format_srt_time(seconds):
     s = int(seconds % 60)
     ms = int(round((seconds - int(seconds)) * 1000))
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+
+
+def _words_to_srt_blocks(all_words, threshold=BREATH_PAUSE_MS):
+    """Split a flat list of faster-whisper Word objects into SRT block strings.
+
+    A new block starts whenever the gap between consecutive words is >= threshold
+    (seconds).  Words with no .start/.end are skipped.
+
+    Returns a list of raw SRT block strings (index + timestamp + text), not yet
+    joined — caller does '\n'.join(blocks).
+    """
+    blocks = []
+    idx = 1
+    group = []
+    for i, w in enumerate(all_words):
+        group.append(w)
+        is_last = (i == len(all_words) - 1)
+        gap = (all_words[i + 1].start - w.end) if not is_last else None
+        if is_last or gap >= threshold:
+            start = _format_srt_time(group[0].start)
+            end = _format_srt_time(group[-1].end)
+            text = ' '.join(word.word.strip() for word in group)
+            blocks.append(f'{idx}\n{start} --> {end}\n{text}\n')
+            idx += 1
+            group = []
+    return blocks
 
 
 def cleanup_old_jobs(max_age_seconds=3600):
