@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Claude Code
+.claude/
+CLAUDE.md
+docs/superpowers/
+
+# Generated job output
+output/
+
+# Cached API data
+wbw_*.json
+words_*.json
+
+# Dev/test media files
+surah yusuf*
+progress.md
+
+# Media files
+*.mp3
+*.mp4
+*.ass
+*.srt
