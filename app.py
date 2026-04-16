@@ -207,7 +207,9 @@ def run_pipeline(job_id, mp3_path, surah, translation_id, res,
             if seg.words:
                 all_words.extend(seg.words)
 
-        # Split into SRT blocks at every breath pause
+        # Split into per-block Word groups (preserves timestamps for
+        # downstream verse-boundary splitting) and into SRT text blocks.
+        block_word_groups = _words_to_block_groups(all_words)
         srt_lines = _words_to_srt_blocks(all_words)
 
         srt_path = str(job_dir / 'transcription.srt')
@@ -221,7 +223,7 @@ def run_pipeline(job_id, mp3_path, surah, translation_id, res,
 
         from add_translation import (
             parse_srt, parse_translation_file, match_blocks_to_verses,
-            build_output, load_word_data,
+            split_blocks_at_verse_boundaries, build_output, load_word_data,
         )
         from quran_video import write_ass
 
@@ -238,6 +240,10 @@ def run_pipeline(job_id, mp3_path, surah, translation_id, res,
 
         blocks = parse_srt(srt_path)
         assignments = match_blocks_to_verses(blocks, verses)
+        # Split any block that spans multiple verses (reciter didn't pause
+        # between them) using preserved Whisper word timestamps.
+        blocks, assignments = split_blocks_at_verse_boundaries(
+            blocks, block_word_groups, verses, assignments)
 
         translated_srt, segments = build_output(blocks, verses, assignments,
                                                word_data=word_data,
@@ -326,6 +332,26 @@ def _format_srt_time(seconds):
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
 
 
+def _words_to_block_groups(all_words, threshold=BREATH_PAUSE_MS):
+    """Split a flat list of faster-whisper Word objects into groups at breath pauses.
+
+    A new group starts whenever the gap between consecutive words is >= threshold
+    (seconds).
+
+    Returns a list of lists of Word objects — one inner list per SRT block.
+    """
+    groups = []
+    group = []
+    for i, w in enumerate(all_words):
+        group.append(w)
+        is_last = (i == len(all_words) - 1)
+        gap = (all_words[i + 1].start - w.end) if not is_last else None
+        if is_last or gap >= threshold:
+            groups.append(group)
+            group = []
+    return groups
+
+
 def _words_to_srt_blocks(all_words, threshold=BREATH_PAUSE_MS):
     """Split a flat list of faster-whisper Word objects into SRT block strings.
 
@@ -335,20 +361,13 @@ def _words_to_srt_blocks(all_words, threshold=BREATH_PAUSE_MS):
     Returns a list of raw SRT block strings (index + timestamp + text), not yet
     joined — caller does '\n'.join(blocks).
     """
+    groups = _words_to_block_groups(all_words, threshold=threshold)
     blocks = []
-    idx = 1
-    group = []
-    for i, w in enumerate(all_words):
-        group.append(w)
-        is_last = (i == len(all_words) - 1)
-        gap = (all_words[i + 1].start - w.end) if not is_last else None
-        if is_last or gap >= threshold:
-            start = _format_srt_time(group[0].start)
-            end = _format_srt_time(group[-1].end)
-            text = ' '.join(word.word.strip() for word in group)
-            blocks.append(f'{idx}\n{start} --> {end}\n{text}\n')
-            idx += 1
-            group = []
+    for idx, group in enumerate(groups, 1):
+        start = _format_srt_time(group[0].start)
+        end = _format_srt_time(group[-1].end)
+        text = ' '.join(word.word.strip() for word in group)
+        blocks.append(f'{idx}\n{start} --> {end}\n{text}\n')
     return blocks
 
 

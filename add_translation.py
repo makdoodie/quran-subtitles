@@ -28,6 +28,7 @@ import sys
 import os
 import json
 import urllib.request
+from collections import Counter
 from difflib import SequenceMatcher
 
 
@@ -192,32 +193,203 @@ def containment_score(needle, haystack):
     return matched / len(needle)
 
 
+def align_words_to_verses(whisper_word_groups, verses):
+    """Globally align grouped Whisper word sequences to verse word sequences.
+
+    whisper_word_groups  – list of lists of normalized Arabic word strings
+                           (one inner list per SRT block or word group)
+    verses               – list of verse dicts with a 'norm' key
+
+    Flattens both sides into single sequences, runs SequenceMatcher on the
+    word lists, and for each Whisper word records which verse (if any) it
+    aligned to.
+
+    Returns a list matching the input shape: one inner list per group, each
+    containing int|None entries (the aligned verse index, or None if the
+    word was not part of any matching block).
+    """
+    whisper_tuples = []   # (word_norm, group_idx)
+    for gi, group in enumerate(whisper_word_groups):
+        for w in group:
+            whisper_tuples.append((w, gi))
+
+    verse_tuples = []     # (word_norm, verse_idx)
+    for vi, v in enumerate(verses):
+        for w in v['norm'].split():
+            verse_tuples.append((w, vi))
+
+    whisper_seq = [t[0] for t in whisper_tuples]
+    verse_seq = [t[0] for t in verse_tuples]
+
+    word_to_verse = [None] * len(whisper_seq)
+    if whisper_seq and verse_seq:
+        sm = SequenceMatcher(None, whisper_seq, verse_seq, autojunk=False)
+        for m in sm.get_matching_blocks():
+            for k in range(m.size):
+                word_to_verse[m.a + k] = verse_tuples[m.b + k][1]
+
+    per_group = [[] for _ in whisper_word_groups]
+    for idx, (_, gi) in enumerate(whisper_tuples):
+        per_group[gi].append(word_to_verse[idx])
+
+    return per_group
+
+
+def _seconds_to_srt_ts(seconds):
+    """Convert float seconds to an SRT timestamp 'HH:MM:SS,mmm'."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+
+
 def match_blocks_to_verses(blocks, verses):
-    """Assign each SRT block a verse index using sequential fuzzy matching.
+    """Assign each SRT block a verse index using global word-level alignment.
+
+    Aligns the full Whisper word stream against the full verse word stream
+    once (cannot get "stuck" on a single verse), then assigns each block to
+    the verse most of its aligned words belong to. Blocks with no aligned
+    words inherit the previous block's assignment. Final assignments are
+    clamped to be monotonically non-decreasing — repetitions within a single
+    verse are handled downstream in build_verse_blocks.
 
     Returns a list of verse indices, one per block.
     """
-    vi = 0
+    if not blocks or not verses:
+        return [0] * len(blocks)
+
+    word_groups = [b['norm'].split() for b in blocks]
+    alignment = align_words_to_verses(word_groups, verses)
+
     assignments = []
-
-    for block in blocks:
-        if vi >= len(verses):
-            assignments.append(len(verses) - 1)
-            continue
-
-        cur = containment_score(block['norm'], verses[vi]['norm'])
-
-        nxt = 0.0
-        if vi + 1 < len(verses):
-            nxt = containment_score(block['norm'], verses[vi + 1]['norm'])
-
-        # Advance to next verse if it is a clearly better match
-        if nxt > cur and nxt > 0.3:
-            vi += 1
-
+    running_max = 0
+    last_assigned = 0
+    for block_alignment in alignment:
+        aligned = [v for v in block_alignment if v is not None]
+        if aligned:
+            vi = Counter(aligned).most_common(1)[0][0]
+        else:
+            vi = last_assigned
+        # Monotonic non-decreasing
+        vi = max(vi, running_max)
+        running_max = vi
         assignments.append(vi)
+        last_assigned = vi
 
     return assignments
+
+
+def split_blocks_at_verse_boundaries(blocks, block_word_groups, verses,
+                                     assignments):
+    """Split Whisper blocks that contain words from multiple verses.
+
+    When a single SRT block spans multiple verses (which happens when the
+    reciter doesn't pause between verses and breath-pause segmentation
+    produced an oversized block), use the per-word verse alignment and the
+    preserved faster-whisper Word timestamps to cut the block into
+    sub-blocks at verse boundaries.
+
+    blocks             – list of SRT block dicts (as from parse_srt)
+    block_word_groups  – parallel list of lists of faster-whisper Word
+                         objects (same length as blocks); each Word has
+                         .word/.start/.end attributes
+    verses             – list of verse dicts
+    assignments        – verse index per block from match_blocks_to_verses
+
+    Returns (new_blocks, new_assignments) — both lists may be longer than
+    the inputs. If block_word_groups is missing or shape-mismatched, the
+    inputs are returned unchanged.
+    """
+    if not blocks or not block_word_groups:
+        return blocks, assignments
+    if len(block_word_groups) != len(blocks):
+        return blocks, assignments
+
+    # Per-word alignment using the Word objects' normalized text so we can
+    # map alignment positions back to exact timestamps.
+    normalized_groups = [
+        [normalize_arabic(w.word) for w in group]
+        for group in block_word_groups
+    ]
+    alignment = align_words_to_verses(normalized_groups, verses)
+
+    # Flatten, forward-fill None, and enforce monotonic non-decreasing
+    # across the full word stream so alignment jitter can't produce
+    # backwards verse jumps within a block.
+    flat = [v for group in alignment for v in group]
+    fallback = assignments[0] if assignments else 0
+    resolved = []
+    last = None
+    for v in flat:
+        if v is not None:
+            last = v
+        resolved.append(last)
+    # Fill leading Nones by looking forward
+    first_valid = next((v for v in flat if v is not None), fallback)
+    for i in range(len(resolved)):
+        if resolved[i] is None:
+            resolved[i] = first_valid
+        else:
+            break
+    # Defensive: any remaining None → fallback
+    for i, v in enumerate(resolved):
+        if v is None:
+            resolved[i] = fallback
+    # Monotonic non-decreasing
+    running = 0
+    for i in range(len(resolved)):
+        if resolved[i] < running:
+            resolved[i] = running
+        else:
+            running = resolved[i]
+
+    # Split back per block
+    new_blocks = []
+    new_assignments = []
+    offset = 0
+    for bi, (block, words) in enumerate(zip(blocks, block_word_groups)):
+        orig_vi = assignments[bi] if bi < len(assignments) else 0
+        if not words:
+            new_blocks.append(block)
+            new_assignments.append(orig_vi)
+            continue
+
+        block_resolved = resolved[offset:offset + len(words)]
+        offset += len(words)
+
+        # Build contiguous runs of same verse
+        runs = []
+        rs = 0
+        for i in range(1, len(block_resolved)):
+            if block_resolved[i] != block_resolved[rs]:
+                runs.append((rs, i - 1, block_resolved[rs]))
+                rs = i
+        runs.append((rs, len(block_resolved) - 1, block_resolved[rs]))
+
+        if len(runs) == 1:
+            # Single verse — keep block unchanged, but trust alignment
+            # over the matcher's majority vote when they disagree.
+            new_blocks.append(block)
+            new_assignments.append(block_resolved[0])
+            continue
+
+        for run_start, run_end, run_vi in runs:
+            first_word = words[run_start]
+            last_word = words[run_end]
+            start_ts = _seconds_to_srt_ts(first_word.start)
+            end_ts = _seconds_to_srt_ts(last_word.end)
+            text = ' '.join(w.word.strip()
+                            for w in words[run_start:run_end + 1])
+            new_blocks.append({
+                'index': str(len(new_blocks) + 1),
+                'timestamp': f'{start_ts} --> {end_ts}',
+                'text': text,
+                'norm': normalize_arabic(text),
+            })
+            new_assignments.append(run_vi)
+
+    return new_blocks, new_assignments
 
 
 # ── Translation splitting and subtitle block assembly ──────────────
@@ -436,13 +608,17 @@ def build_verse_blocks(srt_blocks, translation, verse_norm='', verse_words=None,
 
     en_len = len(translation)
 
-    # Preferred break points: right after punctuation + space.
+    # Preferred break points: right after punctuation + space, or right after
+    # an em dash (which needs no following space — it often glues directly to
+    # the next word or editorial bracket like "Jacob—˹just˺").
     # Skip punctuation that immediately follows a closing bracket (] or ˺) —
     # these are editorial insertions like "[The brothers said]," that aren't
     # semantic clause boundaries.
     punct_breaks = [0]
     for i in range(en_len - 1):
-        if translation[i] in ',.!?;:' and translation[i + 1] == ' ':
+        if translation[i] == '\u2014':  # em dash — always a clause boundary
+            punct_breaks.append(i + 1)
+        elif translation[i] in ',.!?;:' and translation[i + 1] == ' ':
             if i > 0 and translation[i - 1] == ']':
                 continue
             punct_breaks.append(i + 2)
